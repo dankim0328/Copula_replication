@@ -1,2 +1,0 @@
-# Copula_replication
-copula
