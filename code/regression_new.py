@@ -9,33 +9,33 @@ import warnings
 warnings.filterwarnings('ignore')
 
 def demean2(df_in, cols, tol=1e-8, max_iter=100):
-    """SKU + STORE 두 방향 FE (Two-Way Fixed Effects) 반복 제거 (Iterative Demeaning)"""
+    """Iterative Demeaning for Two-Way Fixed Effects (SKU + STORE)"""
     d = df_in[cols].astype(float).copy()
     for _ in range(max_iter):
         prev = d.values.copy()
-        # SKU 평균 빼기
+        # Subtract SKU mean
         d -= d.groupby(df_in["sku_id"]).transform("mean")
-        # Store 평균 빼기
+        # Subtract Store mean
         d -= d.groupby(df_in["store"]).transform("mean")
         if np.max(np.abs(d.values - prev)) < tol:
             break
     return d
 
 def make_pstar(series):
-    """각 SKU 내 ln_price의 Copula 통제 변수 P* (Mid-rank ECDF 기반)"""
+    """Generate Copula control variable P* (based on Mid-rank ECDF)"""
     n_s = len(series)
     H = (series.rank(method="average") - 0.5) / n_s
     return norm.ppf(H.clip(1e-6, 1 - 1e-6))
 
 def run_estimations():
     # ==============================================================================
-    # 1. 데이터 로드 및 결측치 제거
+    # 1. Load Data and Remove Missing Values
     # ==============================================================================
-    file_path = "../data/final_tna_panel_ultimate.dta"
+    file_path = "../data/final_tna_panel_outlier.dta"
     print(f"Loading data from {file_path}...")
     df = pd.read_stata(file_path)
 
-    # 변수명 통일
+    # Standardize variable names
     rename_dict = {}
     if 'sku_ln_price' in df.columns:
         rename_dict['sku_ln_price'] = 'ln_price'
@@ -44,33 +44,33 @@ def run_estimations():
     if rename_dict:
         df = df.rename(columns=rename_dict)
 
-    # 결측치 제거
+    # Drop missing values
     df = df.dropna(subset=['ln_sales', 'ln_price', 'ln_cost', 'lag_ln_sales', 'sku_promo',
                            'income', 'educ', 'hsizeavg', 'nocar']).reset_index(drop=True)
 
     print(f"Analysis rows: {len(df):,}")
     
     # ==============================================================================
-    # 2. 데이터 Demeaning (Two-Way FE 제거)
+    # 2. Data Demeaning (Remove Two-Way FE)
     # ==============================================================================
     print("\nTwo-way FE demeaning (SKU + STORE)...")
     vars_to_demean = ['ln_sales', 'ln_price', 'ln_cost', 'lag_ln_sales', 'sku_promo']
     dm = demean2(df, vars_to_demean)
     
-    # 자유도 조정 (N - K - N_store - N_sku)
+    # Adjust degrees of freedom (N - K - N_store - N_sku)
     n_sku = df["sku_id"].nunique()
     n_store = df["store"].nunique()
     df_resid_base = len(df) - 3 - (n_sku - 1) - (n_store - 1)
     
     # ==============================================================================
-    # 사전 검정: 가격 데이터(ln_price)의 비정규성 검정
+    # Pre-test: Non-normality test for ln_price (Jarque-Bera Test)
     # ==============================================================================
-    print("\n=== 사전 검정: ln_price 비정규성 검정 (Jarque-Bera Test) ===")
+    print("\n=== Pre-test: ln_price Non-normality (Jarque-Bera Test) ===")
     jb_stat, jb_pval = jarque_bera(df['ln_price'])
     print(f"Jarque-Bera Test Statistic: {jb_stat:.4f}")
     print(f"P-value: {jb_pval:.4e}")
     if jb_pval < 0.05:
-        print("결론: ln_price는 정규분포를 따르지 않습니다. (Copula 적용 타당!)\n")
+        print("Conclusion: ln_price is not normally distributed. (Copula approach is valid!)\n")
 
     # ==============================================================================
     # Model 1: Naive OLS (Two-Way Fixed Effects)
@@ -78,10 +78,10 @@ def run_estimations():
     print("\n" + "=" * 65)
     print("Model 1: Naive OLS (Two-Way FE)")
     print("=" * 65)
-    # Demeaning을 했으므로 상수항(const)을 제외하고 회귀
+    # Variables are already demeaned, so exclude the constant term
     exog_ols = dm[['ln_price', 'lag_ln_sales', 'sku_promo']]
     model_ols = IV2SLS(dependent=dm['ln_sales'], exog=exog_ols, endog=None, instruments=None)
-    # Panel 단위 Clustered SE 적용 (친구 코드의 한계 극복)
+    # Apply Panel Clustered SE
     res_ols = model_ols.fit(cov_type='clustered', clusters=df['panel_id'])
     print(res_ols.summary.tables[1])
 
@@ -106,29 +106,29 @@ def run_estimations():
     print("Model 3: Gaussian Copula (Park and Gupta, 2012)")
     print("=" * 65)
 
-    # 🚨 핵심 교정 (Park & Gupta Strict Implementation) 🚨
-    # 가격(ln_price)은 이미 Demean되어 있으나, 다른 외생변수(lag_ln_sales, sku_promo)의 
-    # 영향도 마저 제거해야 순수한 가격의 구조적 충격(Structural Shock, v)을 얻을 수 있습니다.
-    # Raw Price에 ECDF를 씌우면 FE 분산이 섞여 Copula가 붕괴됩니다.
+    # 🚨 Core Correction (Strict Park & Gupta Implementation) 🚨
+    # Although ln_price is demeaned, we must also partial out the effects of other 
+    # exogenous variables (lag_ln_sales, sku_promo) to extract the pure structural shock (v).
+    # Computing the ECDF on the raw price directly would confound the Copula with FE variance.
     X_exog_price = dm[['lag_ln_sales', 'sku_promo']].values
     P_val = dm['ln_price'].values
     c_exog, _, _, _ = np.linalg.lstsq(X_exog_price, P_val, rcond=None)
     pure_price_resid = P_val - X_exog_price @ c_exog
 
-    # Step 1: 순수 잔차(v)에 대해 ECDF 및 P* 산출
+    # Step 1: Compute ECDF and P* on the pure residuals
     dm["copula_p_star"] = make_pstar(pd.Series(pure_price_resid))
 
     exog_copula = dm[['ln_price', 'lag_ln_sales', 'sku_promo', 'copula_p_star']]
     model_copula = IV2SLS(dependent=dm['ln_sales'], exog=exog_copula, endog=None, instruments=None)
     res_copula_initial = model_copula.fit(cov_type='clustered', clusters=df['panel_id'])
 
-    # Step 3: Bootstrapped Standard Errors (B=500, Panel Block Bootstrap)
+    # Step 2: Bootstrapped Standard Errors (B=500, Panel Block Bootstrap)
     print("\nBootstrapping standard errors (B=500, fast iterative demeaning)...")
     np.random.seed(42)
     B = 500
     boot_coefs = []
     
-    # 고속 샘플링을 위한 준비
+    # Preparation for fast sampling
     panel_grp = {k: v.tolist() for k, v in df.groupby("panel_id").groups.items()}
     pk = list(panel_grp.keys())
     n_pk = len(pk)
@@ -144,10 +144,10 @@ def run_estimations():
             
         bdf = df.iloc[idx].reset_index(drop=True)
         
-        # Bootstrap 내 Demeaning
+        # Demeaning within the Bootstrap
         bdm = demean2(bdf, ['ln_sales', 'ln_price', 'lag_ln_sales', 'sku_promo'], max_iter=50)
         
-        # Bootstrap 내 순수 잔차(v) 도출 및 ECDF 재산출
+        # Extract pure residual and recalculate ECDF within Bootstrap
         b_X_exog = bdm[['lag_ln_sales', 'sku_promo']].values
         b_P_val = bdm['ln_price'].values
         b_c_exog, _, _, _ = np.linalg.lstsq(b_X_exog, b_P_val, rcond=None)
@@ -158,14 +158,14 @@ def run_estimations():
         X_b = bdm[['ln_price', 'lag_ln_sales', 'sku_promo', 'copula_p_star']].values
         Y_b = bdm['ln_sales'].values
         
-        # Numpy lstsq로 초고속 해 구하기
+        # Use Numpy lstsq for high-speed estimation
         try:
             c_b, _, _, _ = np.linalg.lstsq(X_b, Y_b, rcond=None)
             boot_coefs.append(c_b)
         except Exception:
             pass
 
-    # 부트스트랩 계수의 표준편차가 바로 Cluster-robust Standard Error 입니다.
+    # The standard deviation of the bootstrap coefficients represents the Cluster-robust Standard Error
     boot_arr = np.array(boot_coefs)
     boot_se = boot_arr.std(axis=0)
     copula_coefs = res_copula_initial.params
@@ -182,7 +182,7 @@ def run_estimations():
 
 
     # ==============================================================================
-    # 최종 요약 비교
+    # Final Summary Comparison
     # ==============================================================================
     print("=== 📊 Elasticity Comparison Summary ===")
     summary_df = pd.DataFrame({

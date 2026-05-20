@@ -1,37 +1,37 @@
 /*==================================================
   Dominick's Finer Foods (DFF) Data Cleaning: 
-  Outlier 보존 & 결측치 제거 & 프로모션 통제 반영 버전
+  Outlier Preserved & Missing Values Removed & Promotion Controlled Version
 ==================================================*/
 
 clear all
 set more off
 
-// 글로벌 변수($dir)로 작업 경로 지정
+// Specify working directory path as a global variable ($dir)
 global dir "/Users/dankim/Downloads/SNU/대학원/논문/Copula_replication/data"
 
 
 /*==================================================
-  1. UPC 마스터 데이터 전처리 (R & Python 로직 통합)
+  1. UPC Master Data Preprocessing (Integrate R & Python Logic)
 ==================================================*/
 import delimited "$dir/upctna.csv", clear
 gen desc_lower = lower(descrip)
 gen size_upper = upper(size)
 
-// [Best Logic 1] 멀티팩(Multi-pack) 및 일반 용량 정규표현식 파싱
+// [Best Logic 1] Multi-pack and general volume regex parsing
 gen volume_oz = .
 gen mult1 = real(ustrregexs(1)) if ustrregexm(size_upper, "^([0-9]+)/")
 gen mult2 = real(ustrregexs(1)) if ustrregexm(size_upper, "/([0-9\.]+)")
 replace volume_oz = mult1 * mult2 if !missing(mult1) & !missing(mult2)
 replace volume_oz = real(ustrregexs(1)) if missing(volume_oz) & ustrregexm(size_upper, "([0-9\.]+)")
 
-// ★ [핵심 수정] 이상치(Outlier)는 보존하고, 진짜 결측치(Missing)만 제거 ★
+// ★ [Core Modification] Preserve Outliers, and only remove true Missing values ★
 drop if missing(volume_oz)
 
-// 비-참치 및 이질적 포장 형태 완벽 제거
+// Perfectly remove non-tuna and heterogeneous packaging types
 drop if ustrregexm(desc_lower, "salmon|oyster|clam|crab|mack|sardine|anchov|caviar|shrimp|lobster")
 drop if ustrregexm(desc_lower, "sleeve|lunch|pre-mix|salad|kit|snack|pack")
 
-// 브랜드 및 특성 식별 (9개 SKU 매핑용)
+// Identify brands and characteristics (for 9-SKU mapping)
 gen brand = "Other"
 replace brand = "StarKist" if ustrregexm(desc_lower, "star|sk ")
 replace brand = "BumbleBee" if ustrregexm(desc_lower, "bumble|bb|bum bee")
@@ -44,23 +44,23 @@ gen is_premium = ustrregexm(desc_lower, "alba|solid|sld|white|wht")
 gen is_standard = ustrregexm(desc_lower, "chunk|chk|light|lgt")
 
 // 9-SKU Mapping
-gen sku_id = 9 // Default: Misc (진짜 정체를 알 수 없는 기타 등등만 남음)
+gen sku_id = 9 // Default: Misc (only true unknown misc items remain)
 
-// [메이저 브랜드: Water/Oil 묻지도 따지지도 않고 브랜드로 통합]
+// [Major Brands: Consolidate by brand regardless of Water/Oil]
 replace sku_id = 1 if brand == "StarKist" 
 replace sku_id = 2 if brand == "BumbleBee" 
 replace sku_id = 5 if brand == "Dominicks" 
 
-// [COS: 물량이 많으므로 Water와 Oil 분리 유지]
+// [COS: Maintain separation of Water and Oil due to large volume]
 replace sku_id = 3 if brand == "COS" & is_oil == 0
 replace sku_id = 4 if brand == "COS" & is_oil == 1
 
-// [Other 브랜드: 특성별로 분류]
+// [Other Brands: Classify by characteristics]
 replace sku_id = 6 if brand == "Other" & is_premium == 1
 replace sku_id = 7 if brand == "Other" & is_standard == 1
 replace sku_id = 8 if brand == "Other" & is_diet == 1
 
-// 라벨링 이름 직관적으로 변경 및 중복 에러 방지 안전장치
+// Change labeling names intuitively and safeguard against duplicate errors
 capture label drop sku_lbl 
 label define sku_lbl 1 "StarKist(All)" 2 "BumbleBee(All)" 3 "COS-Water" 4 "COS-Oil" ///
                      5 "Dominicks(All)" 6 "Other-Premium" 7 "Other-Standard" 8 "Other-Diet" 9 "Misc"
@@ -71,36 +71,36 @@ save "$dir/upctna_clean.dta", replace
 
 
 /*==================================================
-  2. Movement 데이터 병합 및 집계
+  2. Movement Data Merging and Aggregation
 ==================================================*/
 import delimited "$dir/wtna.csv", clear
 keep if ok == 1 & move > 0 & price > 0 & qty > 0
 
-// 마진율(Profit) 이상치 및 Loss Leader 제거
+// Remove margin (Profit) outliers and Loss Leaders
 keep if !missing(profit) & profit > 0 & profit < 100
 
-// ★ DFF sale 변수를 0/1 프로모션 더미로 변환 ★
+// ★ Convert DFF sale variable to 0/1 promotion dummy ★
 gen is_promo = 0
 replace is_promo = 1 if sale == "B" | sale == "S"
 
-// 정제된 UPC 데이터 병합 (기준: upc)
+// Merge cleaned UPC data (Key: upc)
 merge m:1 upc using "$dir/upctna_clean.dta"
 keep if _merge == 3
 drop _merge
 
-// 스토어 상권 정보 병합 (기준: store)
+// Merge store demographic information (Key: store)
 merge m:1 store using "$dir/demo.dta"
 keep if _merge == 3
 drop _merge
 
-// 온스당 소매가 및 역산 도매가 계산
+// Calculate retail price per ounce and back-calculated wholesale cost
 gen unit_price = price / qty
 gen price_per_oz = unit_price / volume_oz
 gen cost_per_oz = price_per_oz * (1 - (profit / 100))
 gen revenue = unit_price * move
 gen oz_sold = move * volume_oz
 
-// Divisia Price Index 및 프로모션 가중치 산출
+// Calculate Divisia Price Index and promotion weights
 gen ln_p = ln(price_per_oz)
 gen ln_c = ln(cost_per_oz)
 
@@ -109,9 +109,9 @@ gen share = revenue / total_rev_sku
 
 gen weighted_ln_p = share * ln_p
 gen weighted_ln_c = share * ln_c
-gen weighted_promo = share * is_promo // 해당 SKU 내에서 프로모션이 적용된 매출 비중
+gen weighted_promo = share * is_promo // Proportion of sales with promotion applied within the SKU
 
-// SKU 수준으로 Collapse (프로모션 변수 sku_promo 추가)
+// Collapse to SKU level (Added promotion variable sku_promo)
 collapse (sum) oz_sold (sum) sku_ln_price=weighted_ln_p ///
          (sum) sku_ln_cost=weighted_ln_c (sum) sku_promo=weighted_promo ///
          (mean) income educ hsizeavg nocar, by(store week sku_id)
@@ -120,11 +120,11 @@ gen ln_sales = ln(oz_sold)
 gen sku_price = exp(sku_ln_price)
 gen sku_cost = exp(sku_ln_cost)
 
-// 시계열 갭을 완벽하게 통제하는 Stata 내장 Lag
+// Stata built-in Lag to perfectly control time-series gaps
 egen panel_id = group(store sku_id)
 xtset panel_id week
 
 gen lag_ln_sales = L.ln_sales
 
-// 최종 데이터 저장
+// Save final data
 save "$dir/final_tna_panel_outlier.dta", replace
