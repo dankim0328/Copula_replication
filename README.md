@@ -8,6 +8,23 @@ This repository contains the replication files for estimating the price elastici
 - `data/`: Contains the raw and processed datasets (ignored in git to save space).
 - `paper/`: Contains manuscript drafts and result tables.
 
+## Data
+
+The original data used in this replication is the **Dominick's Finer Foods** scanner dataset, provided by the University of Chicago Booth School of Business.
+
+You can download the data from:
+**https://www.chicagobooth.edu/research/kilts/research-data/dominicks**
+
+The following three files are required to run the data cleaning scripts:
+
+- `wtna.zip` — Weekly movement data for the canned tuna category
+- `upctna.csv` — UPC-level product information for canned tuna
+- `demo.dta` — Store-level demographic data
+
+After downloading, place these files in the `data/` directory before running the cleaning scripts.
+
+---
+
 ## Data Processing Pipeline
 
 The data cleaning process uses Stata (`.do`) files to clean raw scanner data and produce the final panel datasets.
